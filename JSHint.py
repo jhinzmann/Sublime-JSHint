@@ -6,6 +6,10 @@ import sublime, sublime_plugin
 import os, sys, subprocess, codecs, re, webbrowser
 from threading import Timer
 
+sys.path.append(os.path.join(os.path.dirname(__file__), "python-path-specification"))
+
+import pathspec
+
 try:
   import commands
 except ImportError:
@@ -13,6 +17,7 @@ except ImportError:
 
 PLUGIN_FOLDER = os.path.dirname(os.path.realpath(__file__))
 RC_FILE = ".jshintrc"
+IGNORE_FILE = ".jshintignore"
 SETTINGS_FILE = "JSHint.sublime-settings"
 KEYMAP_FILE = "Default ($PLATFORM).sublime-keymap"
 OUTPUT_VALID = b"*** JSHint output ***"
@@ -21,6 +26,13 @@ class JshintCommand(sublime_plugin.TextCommand):
   def run(self, edit, show_regions=True, show_panel=True):
     # Make sure we're only linting javascript files.
     if self.file_unsupported():
+      return
+
+    # Do not lint if file is ignored by a .jshintignore, reset if linted before
+    if self.file_ignored():
+      JshintGlobalStore.reset()
+      JshintEventListeners.reset()
+      self.view.erase_regions("jshint_errors")
       return
 
     # Get the current text in the buffer and save it in a temporary file.
@@ -73,6 +85,46 @@ class JshintCommand(sublime_plugin.TextCommand):
     has_js_or_html_syntax = bool(re.search(r'JavaScript|HTML', view_settings.get("syntax"), re.I))
     has_json_syntax = bool(re.search("JSON", view_settings.get("syntax"), re.I))
     return has_json_syntax or (not has_js_or_html_extension and not has_js_or_html_syntax)
+
+  def file_ignored(self):
+    """Check if current file is matched by a .jshintignore file.
+    Use pathspec library to evaluate the .jshintignore patterns.
+    """
+    ignore_files = self.find_jshintignore_files()
+
+    if ignore_files:
+      jshintignore_file = ignore_files[-1]
+      with open(jshintignore_file) as jshintignore:
+        spec = pathspec.PathSpec.from_lines('gitignore', jshintignore)
+        matches = spec.match_tree(os.path.dirname(jshintignore_file))
+        for match in matches:
+          abs_match = os.path.join(os.path.dirname(jshintignore_file),match)
+          if  abs_match == self.view.file_name():
+            if PluginUtils.get_pref('print_diagnostics'):
+              print(abs_match + " ignored in " + jshintignore_file)
+            return True
+
+    return False
+
+  def find_jshintignore_files(self):
+    """Search for .jshintignore files along the root path of the current file.
+    Return a list of paths to .jshintignore files found, sorted from root to current parent directory.
+    """
+    parent_dir = os.path.abspath(os.path.join(self.view.file_name(), os.pardir))
+    root_path = os.path.abspath(os.sep)
+
+    ignore_files = []
+
+    if os.path.isfile(os.path.join(root_path, IGNORE_FILE)):
+      ignorefiles.append(os.path.join(root_path, IGNORE_FILE))
+
+    for path in parent_dir.split(os.sep):
+      root_path = os.path.join(root_path, path)
+      ignore_file_path = os.path.join(root_path, IGNORE_FILE)
+      if os.path.isfile(ignore_file_path):
+        ignore_files.append(ignore_file_path)
+
+    return ignore_files
 
   def save_buffer_to_temp_file(self):
     buffer_text = self.view.substr(sublime.Region(0, self.view.size()))
